@@ -5,6 +5,7 @@ import { Send, User, Bot, LogOut, Sparkles, TrendingUp, BarChart3 } from 'lucide
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { useToaster } from '@/components/ui/toaster'
 import { cn } from '@/lib/utils'
 
 interface Message {
@@ -37,6 +38,7 @@ export function ChatInterface({
   const [input, setInput] = useState('')
   const [internalMessages, setInternalMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState(false)
+  const toaster = useToaster()
 
   // Use external messages if provided, otherwise use internal state
   const messages = externalMessages ?? internalMessages
@@ -104,6 +106,7 @@ export function ChatInterface({
       }
     } catch (error) {
       console.error('Chat error:', error)
+      toaster.error('Failed to send message. Please try again.')
       setMessages([
         ...updatedMessages,
         {
@@ -115,7 +118,7 @@ export function ChatInterface({
     } finally {
       setIsLoading(false)
     }
-  }, [input, isLoading, messages, setMessages])
+  }, [input, isLoading, messages, setMessages, toaster])
 
   const handleExampleClick = (query: string) => {
     setInput(query)

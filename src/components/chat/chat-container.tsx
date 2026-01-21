@@ -7,6 +7,7 @@ import { ChatInterface } from './chat-interface'
 import { Menu, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { useToaster } from '@/components/ui/toaster'
 
 interface ChatContainerProps {
   userId: string
@@ -24,6 +25,7 @@ export function ChatContainer({ userId, userEmail }: ChatContainerProps) {
     deleteSession,
     startNewSession,
   } = useSessions()
+  const toaster = useToaster()
 
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [messages, setMessages] = useState<Message[]>([])
@@ -38,8 +40,11 @@ export function ChatContainer({ userId, userEmail }: ChatContainerProps) {
   }, [currentSession])
 
   const handleSelectSession = useCallback(async (sessionId: string) => {
-    await loadSession(sessionId)
-  }, [loadSession])
+    const result = await loadSession(sessionId)
+    if (!result) {
+      toaster.error('Failed to load conversation')
+    }
+  }, [loadSession, toaster])
 
   const handleNewSession = useCallback(() => {
     startNewSession()
@@ -47,20 +52,31 @@ export function ChatContainer({ userId, userEmail }: ChatContainerProps) {
   }, [startNewSession])
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
-    await deleteSession(sessionId)
-  }, [deleteSession])
+    const success = await deleteSession(sessionId)
+    if (success) {
+      toaster.success('Conversation deleted')
+    } else {
+      toaster.error('Failed to delete conversation')
+    }
+  }, [deleteSession, toaster])
 
   const handleMessagesChange = useCallback(async (newMessages: Message[]) => {
     setMessages(newMessages)
-    
+
     // Auto-save to session
     if (currentSession) {
-      await updateSession(currentSession.id, newMessages)
+      const result = await updateSession(currentSession.id, newMessages)
+      if (!result) {
+        toaster.warning('Failed to save conversation')
+      }
     } else if (newMessages.length > 0) {
       // Create new session on first message
-      await createSession(newMessages)
+      const result = await createSession(newMessages)
+      if (!result) {
+        toaster.warning('Failed to create conversation')
+      }
     }
-  }, [currentSession, createSession, updateSession])
+  }, [currentSession, createSession, updateSession, toaster])
 
   return (
     <div className="flex h-screen bg-background">
