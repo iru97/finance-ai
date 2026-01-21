@@ -1012,16 +1012,16 @@ export class SessionManager {
 
 ```typescript
 // lib/config/models.ts
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // Initialize clients
-const anthropic = new Anthropic();
+const openai = new OpenAI();
 const google = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!);
 
 export const MODEL_CONFIG = {
-  // Fast, cheapest - for classification, validation, simple queries
-  // Gemini 2.0 Flash: $0.10/1M input, $0.40/1M output (10x cheaper than Haiku)
+  // Cheapest - for classification, validation
+  // Gemini 2.0 Flash: $0.10/1M input, $0.40/1M output
   fast: {
     provider: 'google',
     model: 'gemini-2.0-flash',
@@ -1029,19 +1029,20 @@ export const MODEL_CONFIG = {
     temperature: 0.1,
   },
 
-  // Balanced - for most responses, synthesis
-  // Claude Sonnet: Best quality/cost ratio for reasoning
+  // Balanced - for synthesis, most responses
+  // GPT-4.1: $2.00/1M input, $8.00/1M output (45% cheaper than Sonnet)
   balanced: {
-    provider: 'anthropic',
-    model: 'claude-sonnet-4-20250514',
+    provider: 'openai',
+    model: 'gpt-4.1',
     maxTokens: 2048,
     temperature: 0.3,
   },
 
-  // Quality - for complex analysis (use sparingly)
+  // Quality - for complex analysis
+  // GPT-4.1: Same model, higher tokens
   quality: {
-    provider: 'anthropic',
-    model: 'claude-sonnet-4-20250514',
+    provider: 'openai',
+    model: 'gpt-4.1',
     maxTokens: 4096,
     temperature: 0.4,
   },
@@ -1051,8 +1052,9 @@ export const MODEL_CONFIG = {
 // | Model              | Input   | Output  | Use Case           |
 // |--------------------|---------|---------|-------------------|
 // | Gemini 2.0 Flash   | $0.10   | $0.40   | Classification    |
-// | Claude 3.5 Haiku   | $1.00   | $5.00   | (not using)       |
-// | Claude Sonnet 4    | $3.00   | $15.00  | Synthesis/Analysis|
+// | GPT-4.1 Mini       | $0.40   | $1.60   | (alternative)     |
+// | GPT-4.1            | $2.00   | $8.00   | Synthesis/Analysis|
+// | Claude Sonnet 4    | $3.00   | $15.00  | (too expensive)   |
 
 // Unified LLM interface
 export async function callLLM(
@@ -1065,7 +1067,7 @@ export async function callLLM(
   if (modelConfig.provider === 'google') {
     return callGemini(modelConfig, messages, options);
   } else {
-    return callClaude(modelConfig, messages, options);
+    return callOpenAI(modelConfig, messages, options);
   }
 }
 
@@ -1098,53 +1100,66 @@ async function callGemini(
   };
 }
 
-async function callClaude(
+async function callOpenAI(
   config: typeof MODEL_CONFIG.balanced,
   messages: { role: string; content: string }[],
   options?: { tools?: any[]; system?: string }
 ) {
-  const response = await anthropic.messages.create({
+  const systemMessage = options?.system
+    ? [{ role: 'system' as const, content: options.system }]
+    : [];
+
+  const response = await openai.chat.completions.create({
     model: config.model,
     max_tokens: config.maxTokens,
     temperature: config.temperature,
-    system: options?.system,
-    messages: messages.map(m => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    })),
+    messages: [
+      ...systemMessage,
+      ...messages.map(m => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      })),
+    ],
     ...(options?.tools && { tools: options.tools }),
   });
 
   return {
-    text: response.content[0].type === 'text' ? response.content[0].text : '',
+    text: response.choices[0].message.content || '',
     usage: {
-      input: response.usage.input_tokens,
-      output: response.usage.output_tokens,
+      input: response.usage?.prompt_tokens || 0,
+      output: response.usage?.completion_tokens || 0,
     },
   };
 }
 ```
 
+### Model Comparison
+
+| Model | Input | Output | Quality | Best For |
+|-------|-------|--------|---------|----------|
+| **Gemini 2.0 Flash** | $0.10 | $0.40 | Good | Fast tasks |
+| **GPT-4.1** | $2.00 | $8.00 | Excellent | Synthesis |
+| Claude Sonnet 4 | $3.00 | $15.00 | Excellent | (too expensive) |
+
 ### When to Use Each Model
 
 | Task | Model | Why |
 |------|-------|-----|
-| Query classification | **Gemini 2.0 Flash** | 10x cheaper, fast |
+| Query classification | **Gemini 2.0 Flash** | Cheapest, fast enough |
 | Simple lookups | **Gemini 2.0 Flash** | Low cost |
 | Tool planning | **Gemini 2.0 Flash** | Good enough |
 | Data validation | **Gemini 2.0 Flash** | Quick checks |
-| Response synthesis | **Claude Sonnet** | Better reasoning |
-| Complex analysis | **Claude Sonnet** | Quality matters |
-| Multi-company comparison | **Claude Sonnet** | Nuanced output |
+| Response synthesis | **GPT-4.1** | Good quality, 45% cheaper than Sonnet |
+| Complex analysis | **GPT-4.1** | Best price/quality ratio |
 
 ### Monthly Cost Estimate
 
 For 100 queries/day (3000/month):
 - Classification: 3000 × ~500 tokens = 1.5M tokens → **$0.15** (Gemini)
 - Planning: 3000 × ~300 tokens = 0.9M tokens → **$0.09** (Gemini)
-- Synthesis: 3000 × ~1500 tokens = 4.5M tokens → **$81** (Claude Sonnet)
+- Synthesis: 3000 × ~1500 tokens = 4.5M tokens → **$45** (GPT-4.1)
 
-**Total: ~$82/month** (vs ~$150 if using Haiku for fast tasks)
+**Total: ~$46/month** (vs ~$82 with Sonnet, vs ~$150 with Haiku)
 ```
 
 ---
