@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { useToaster } from '@/components/ui/toaster'
+import { ThemeToggle } from '@/components/ui/theme-toggle'
 import { cn } from '@/lib/utils'
 
 interface Message {
@@ -138,8 +139,9 @@ export function ChatInterface({
             <p className="text-xs text-text-tertiary">Research Assistant</p>
           </div>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2">
           <span className="text-sm text-text-secondary hidden sm:block">{userEmail}</span>
+          <ThemeToggle />
           <form action="/api/auth/signout" method="POST">
             <Button variant="ghost" size="icon" type="submit">
               <LogOut className="h-4 w-4" />
