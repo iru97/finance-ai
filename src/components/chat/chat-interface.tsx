@@ -3,7 +3,6 @@
 import { useRef, useEffect, useState, FormEvent, useCallback } from 'react'
 import { Send, User, Bot, LogOut, Sparkles, TrendingUp, BarChart3 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { cn } from '@/lib/utils'
@@ -17,6 +16,8 @@ interface Message {
 interface ChatInterfaceProps {
   userId: string
   userEmail: string
+  messages?: Message[]
+  onMessagesChange?: (messages: Message[]) => void
 }
 
 const EXAMPLE_QUERIES = [
@@ -25,12 +26,28 @@ const EXAMPLE_QUERIES = [
   { icon: Sparkles, text: "Compare MSFT and GOOGL revenue" },
 ]
 
-export function ChatInterface({ userId, userEmail }: ChatInterfaceProps) {
+export function ChatInterface({
+  userId,
+  userEmail,
+  messages: externalMessages,
+  onMessagesChange,
+}: ChatInterfaceProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const [input, setInput] = useState('')
-  const [messages, setMessages] = useState<Message[]>([])
+  const [internalMessages, setInternalMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState(false)
+
+  // Use external messages if provided, otherwise use internal state
+  const messages = externalMessages ?? internalMessages
+  const setMessages = useCallback((updater: Message[] | ((prev: Message[]) => Message[])) => {
+    const newMessages = typeof updater === 'function' ? updater(messages) : updater
+    if (onMessagesChange) {
+      onMessagesChange(newMessages)
+    } else {
+      setInternalMessages(newMessages)
+    }
+  }, [messages, onMessagesChange])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -48,7 +65,8 @@ export function ChatInterface({ userId, userEmail }: ChatInterfaceProps) {
       content: input.trim(),
     }
 
-    setMessages(prev => [...prev, userMessage])
+    const updatedMessages = [...messages, userMessage]
+    setMessages(updatedMessages)
     setInput('')
     setIsLoading(true)
 
@@ -57,7 +75,7 @@ export function ChatInterface({ userId, userEmail }: ChatInterfaceProps) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: [...messages, userMessage].map(m => ({
+          messages: updatedMessages.map(m => ({
             role: m.role,
             content: m.content,
           })),
@@ -70,24 +88,24 @@ export function ChatInterface({ userId, userEmail }: ChatInterfaceProps) {
       const decoder = new TextDecoder()
       let assistantContent = ''
       const assistantId = (Date.now() + 1).toString()
+      const assistantMessage: Message = { id: assistantId, role: 'assistant', content: '' }
 
-      setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: '' }])
+      setMessages([...updatedMessages, assistantMessage])
 
       while (reader) {
         const { done, value } = await reader.read()
         if (done) break
 
         assistantContent += decoder.decode(value, { stream: true })
-        setMessages(prev =>
-          prev.map(m =>
-            m.id === assistantId ? { ...m, content: assistantContent } : m
-          )
-        )
+        setMessages([
+          ...updatedMessages,
+          { ...assistantMessage, content: assistantContent }
+        ])
       }
     } catch (error) {
       console.error('Chat error:', error)
-      setMessages(prev => [
-        ...prev,
+      setMessages([
+        ...updatedMessages,
         {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
@@ -97,7 +115,7 @@ export function ChatInterface({ userId, userEmail }: ChatInterfaceProps) {
     } finally {
       setIsLoading(false)
     }
-  }, [input, isLoading, messages])
+  }, [input, isLoading, messages, setMessages])
 
   const handleExampleClick = (query: string) => {
     setInput(query)
@@ -118,7 +136,7 @@ export function ChatInterface({ userId, userEmail }: ChatInterfaceProps) {
           </div>
         </div>
         <div className="flex items-center gap-4">
-          <span className="text-sm text-text-secondary">{userEmail}</span>
+          <span className="text-sm text-text-secondary hidden sm:block">{userEmail}</span>
           <form action="/api/auth/signout" method="POST">
             <Button variant="ghost" size="icon" type="submit">
               <LogOut className="h-4 w-4" />

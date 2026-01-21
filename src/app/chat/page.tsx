@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
-import { ChatInterface } from '@/components/chat/chat-interface'
+import { ChatContainer } from '@/components/chat/chat-container'
 
 export default async function ChatPage() {
   const supabase = await createClient()
@@ -10,9 +10,5 @@ export default async function ChatPage() {
     redirect('/login')
   }
 
-  return (
-    <div className="flex h-screen flex-col">
-      <ChatInterface userId={user.id} userEmail={user.email || ''} />
-    </div>
-  )
+  return <ChatContainer userId={user.id} userEmail={user.email || ''} />
 }
