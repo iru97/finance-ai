@@ -542,7 +542,7 @@ User Query
 
 ```typescript
 // lib/agents/orchestrator.ts
-import Anthropic from '@anthropic-ai/sdk';
+import { callLLM } from '../config/models';
 
 type QueryType = 'simple' | 'research' | 'complex';
 
@@ -560,19 +560,19 @@ interface ExecutionResult {
   cached: boolean;
 }
 
-const anthropic = new Anthropic();
-
 export class AgentOrchestrator {
   private tools: FinancialTools;
   private cache: DataCache;
+  private toolExecutor: ToolExecutor;
 
   constructor(tools: FinancialTools, cache: DataCache) {
     this.tools = tools;
     this.cache = cache;
+    this.toolExecutor = new ToolExecutor(cache);
   }
 
   async execute(ctx: ExecutionContext): Promise<ExecutionResult> {
-    // Step 1: Classify the query
+    // Step 1: Classify the query (Gemini - cheap & fast)
     const queryType = await this.classifyQuery(ctx.query);
 
     // Step 2: Route to appropriate handler
@@ -587,50 +587,52 @@ export class AgentOrchestrator {
   }
 
   private async classifyQuery(query: string): Promise<QueryType> {
-    // Use Haiku for fast classification
-    const response = await anthropic.messages.create({
-      model: 'claude-3-5-haiku-20241022',
-      max_tokens: 50,
+    // Use Gemini 2.0 Flash - 10x cheaper than Haiku
+    const { text } = await callLLM('fast', [
+      { role: 'user', content: query }
+    ], {
       system: `Classify the financial query into one category:
 - simple: Single data point (price, basic metric)
 - research: Multiple data points, one company
 - complex: Comparison, analysis, multiple companies
 
-Reply with only the category name.`,
-      messages: [{ role: 'user', content: query }],
+Reply with only the category name.`
     });
 
-    const text = response.content[0].type === 'text'
-      ? response.content[0].text.trim().toLowerCase()
-      : 'research';
-
-    return ['simple', 'research', 'complex'].includes(text)
-      ? text as QueryType
+    const category = text.trim().toLowerCase();
+    return ['simple', 'research', 'complex'].includes(category)
+      ? category as QueryType
       : 'research';
   }
 
   // Simple: "What's Apple's stock price?"
   private async handleSimpleQuery(ctx: ExecutionContext): Promise<ExecutionResult> {
-    const response = await anthropic.messages.create({
-      model: 'claude-3-5-haiku-20241022',
-      max_tokens: 1024,
-      system: SIMPLE_QUERY_PROMPT,
-      messages: [{ role: 'user', content: ctx.query }],
-      tools: this.tools.getSimpleTools(),
+    // Use Gemini for simple queries too
+    const { text } = await callLLM('fast', [
+      { role: 'user', content: ctx.query }
+    ], {
+      system: SIMPLE_QUERY_PROMPT
     });
 
-    return this.processToolResponse(response, ctx);
+    // Extract ticker and fetch data
+    const ticker = this.extractTicker(text);
+    if (ticker) {
+      const quote = await this.toolExecutor.execute('getQuote', { ticker });
+      return this.formatSimpleResponse(ctx.query, quote);
+    }
+
+    return { response: text, toolsUsed: [], tokensUsed: 0, cached: false };
   }
 
   // Research: "Give me Apple's financials and recent news"
   private async handleResearchQuery(ctx: ExecutionContext): Promise<ExecutionResult> {
-    // Step 1: Plan what data we need (Haiku - fast)
+    // Step 1: Plan what data we need (Gemini - fast & cheap)
     const plan = await this.createPlan(ctx.query);
 
     // Step 2: Execute tools in parallel
     const results = await this.executeToolsPlan(plan);
 
-    // Step 3: Synthesize response (Opus - quality)
+    // Step 3: Synthesize response (Claude Sonnet - quality)
     const response = await this.synthesize(ctx.query, results);
 
     return response;
@@ -638,7 +640,6 @@ Reply with only the category name.`,
 
   // Complex: "Compare Apple, Microsoft, and Google's P/E ratios"
   private async handleComplexQuery(ctx: ExecutionContext): Promise<ExecutionResult> {
-    // Same as research but with more parallel execution
     const plan = await this.createPlan(ctx.query);
     const results = await this.executeToolsPlan(plan);
     const validated = await this.validate(results);
@@ -648,42 +649,75 @@ Reply with only the category name.`,
   }
 
   private async createPlan(query: string): Promise<ExecutionPlan> {
-    const response = await anthropic.messages.create({
-      model: 'claude-3-5-haiku-20241022',
-      max_tokens: 500,
-      system: PLANNER_PROMPT,
-      messages: [{ role: 'user', content: query }],
+    // Use Gemini for planning - cheap
+    const { text } = await callLLM('fast', [
+      { role: 'user', content: query }
+    ], {
+      system: PLANNER_PROMPT
     });
 
-    return JSON.parse(response.content[0].type === 'text'
-      ? response.content[0].text
-      : '{"steps":[]}');
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { steps: [] };
+    }
   }
 
   private async executeToolsPlan(plan: ExecutionPlan): Promise<ToolResult[]> {
     // Execute independent steps in parallel
     const results = await Promise.all(
-      plan.steps.map(step => this.executeTool(step))
+      plan.steps.map(step => this.toolExecutor.execute(step.tool, step.args))
     );
     return results;
   }
 
+  private async validate(results: ToolResult[]): Promise<ToolResult[]> {
+    // Use Gemini for validation - cheap
+    const { text } = await callLLM('fast', [
+      { role: 'user', content: JSON.stringify(results) }
+    ], {
+      system: VALIDATION_PROMPT
+    });
+
+    const validation = JSON.parse(text);
+    if (!validation.valid) {
+      console.warn('Validation issues:', validation.issues);
+    }
+
+    return results;
+  }
+
   private async synthesize(query: string, results: ToolResult[]): Promise<ExecutionResult> {
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514', // Good balance of quality/cost
-      max_tokens: 2048,
-      system: SYNTHESIS_PROMPT,
-      messages: [{
+    // Use Claude Sonnet for synthesis - quality matters here
+    const { text, usage } = await callLLM('balanced', [
+      {
         role: 'user',
         content: `Query: ${query}\n\nData:\n${JSON.stringify(results, null, 2)}`
-      }],
+      }
+    ], {
+      system: SYNTHESIS_PROMPT
     });
 
     return {
-      response: response.content[0].type === 'text' ? response.content[0].text : '',
+      response: text,
       toolsUsed: results.map(r => r.tool),
-      tokensUsed: response.usage.input_tokens + response.usage.output_tokens,
+      tokensUsed: usage.input + usage.output,
       cached: false,
+    };
+  }
+
+  private extractTicker(text: string): string | null {
+    const match = text.match(/\b[A-Z]{1,5}\b/);
+    return match ? match[0] : null;
+  }
+
+  private formatSimpleResponse(query: string, result: ToolResult): ExecutionResult {
+    const data = result.data as Quote;
+    return {
+      response: `${data.symbol}: $${data.price} (${data.change > 0 ? '+' : ''}${data.changePercent}%)`,
+      toolsUsed: ['getQuote'],
+      tokensUsed: 0,
+      cached: result.cached || false,
     };
   }
 }
@@ -978,17 +1012,27 @@ export class SessionManager {
 
 ```typescript
 // lib/config/models.ts
+import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+// Initialize clients
+const anthropic = new Anthropic();
+const google = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!);
 
 export const MODEL_CONFIG = {
-  // Fast, cheap - for classification and simple queries
+  // Fast, cheapest - for classification, validation, simple queries
+  // Gemini 2.0 Flash: $0.10/1M input, $0.40/1M output (10x cheaper than Haiku)
   fast: {
-    model: 'claude-3-5-haiku-20241022',
+    provider: 'google',
+    model: 'gemini-2.0-flash',
     maxTokens: 1024,
     temperature: 0.1,
   },
 
-  // Balanced - for most responses
+  // Balanced - for most responses, synthesis
+  // Claude Sonnet: Best quality/cost ratio for reasoning
   balanced: {
+    provider: 'anthropic',
     model: 'claude-sonnet-4-20250514',
     maxTokens: 2048,
     temperature: 0.3,
@@ -996,16 +1040,111 @@ export const MODEL_CONFIG = {
 
   // Quality - for complex analysis (use sparingly)
   quality: {
-    model: 'claude-sonnet-4-20250514', // Sonnet is usually enough
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-20250514',
     maxTokens: 4096,
     temperature: 0.4,
   },
 } as const;
 
-// When to use each:
-// - fast: Query classification, validation, simple lookups
-// - balanced: Research queries, synthesis, most user interactions
-// - quality: Complex multi-company analysis, detailed reports
+// Cost comparison per 1M tokens:
+// | Model              | Input   | Output  | Use Case           |
+// |--------------------|---------|---------|-------------------|
+// | Gemini 2.0 Flash   | $0.10   | $0.40   | Classification    |
+// | Claude 3.5 Haiku   | $1.00   | $5.00   | (not using)       |
+// | Claude Sonnet 4    | $3.00   | $15.00  | Synthesis/Analysis|
+
+// Unified LLM interface
+export async function callLLM(
+  config: keyof typeof MODEL_CONFIG,
+  messages: { role: string; content: string }[],
+  options?: { tools?: any[]; system?: string }
+): Promise<{ text: string; usage: { input: number; output: number } }> {
+  const modelConfig = MODEL_CONFIG[config];
+
+  if (modelConfig.provider === 'google') {
+    return callGemini(modelConfig, messages, options);
+  } else {
+    return callClaude(modelConfig, messages, options);
+  }
+}
+
+async function callGemini(
+  config: typeof MODEL_CONFIG.fast,
+  messages: { role: string; content: string }[],
+  options?: { system?: string }
+) {
+  const model = google.getGenerativeModel({
+    model: config.model,
+    systemInstruction: options?.system,
+  });
+
+  const chat = model.startChat({
+    history: messages.slice(0, -1).map(m => ({
+      role: m.role === 'user' ? 'user' : 'model',
+      parts: [{ text: m.content }],
+    })),
+  });
+
+  const result = await chat.sendMessage(messages[messages.length - 1].content);
+  const response = result.response;
+
+  return {
+    text: response.text(),
+    usage: {
+      input: response.usageMetadata?.promptTokenCount || 0,
+      output: response.usageMetadata?.candidatesTokenCount || 0,
+    },
+  };
+}
+
+async function callClaude(
+  config: typeof MODEL_CONFIG.balanced,
+  messages: { role: string; content: string }[],
+  options?: { tools?: any[]; system?: string }
+) {
+  const response = await anthropic.messages.create({
+    model: config.model,
+    max_tokens: config.maxTokens,
+    temperature: config.temperature,
+    system: options?.system,
+    messages: messages.map(m => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    })),
+    ...(options?.tools && { tools: options.tools }),
+  });
+
+  return {
+    text: response.content[0].type === 'text' ? response.content[0].text : '',
+    usage: {
+      input: response.usage.input_tokens,
+      output: response.usage.output_tokens,
+    },
+  };
+}
+```
+
+### When to Use Each Model
+
+| Task | Model | Why |
+|------|-------|-----|
+| Query classification | **Gemini 2.0 Flash** | 10x cheaper, fast |
+| Simple lookups | **Gemini 2.0 Flash** | Low cost |
+| Tool planning | **Gemini 2.0 Flash** | Good enough |
+| Data validation | **Gemini 2.0 Flash** | Quick checks |
+| Response synthesis | **Claude Sonnet** | Better reasoning |
+| Complex analysis | **Claude Sonnet** | Quality matters |
+| Multi-company comparison | **Claude Sonnet** | Nuanced output |
+
+### Monthly Cost Estimate
+
+For 100 queries/day (3000/month):
+- Classification: 3000 × ~500 tokens = 1.5M tokens → **$0.15** (Gemini)
+- Planning: 3000 × ~300 tokens = 0.9M tokens → **$0.09** (Gemini)
+- Synthesis: 3000 × ~1500 tokens = 4.5M tokens → **$81** (Claude Sonnet)
+
+**Total: ~$82/month** (vs ~$150 if using Haiku for fast tasks)
 ```
 
 ---
