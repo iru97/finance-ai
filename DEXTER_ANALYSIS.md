@@ -503,85 +503,702 @@ class BudgetTracker {
 
 ---
 
-## Part 4: Multi-Agent Architecture
+## Part 4: Multi-Agent Architecture (Simple Custom Implementation)
 
-### Recommended Architecture: Specialized Agent Pattern
+### Why NOT LangGraph
 
-Replace the single ReAct agent with four specialized agents:
+LangGraph adds unnecessary complexity for this use case:
+- Extra dependency and learning curve
+- Overkill for linear financial queries
+- We need simple request → plan → execute → respond flow
+- Plain TypeScript with async/await is cleaner and more maintainable
+
+### Simple Orchestrator Pattern
 
 ```
 User Query
     │
     ▼
 ┌─────────────────────────────────────┐
-│ PLANNER AGENT (Claude Opus 4.5)     │
-│ ├─ Analyze query complexity         │
-│ ├─ Generate step-indexed plan       │
-│ ├─ Identify data requirements       │
-│ └─ Output: Structured plan JSON     │
+│ ORCHESTRATOR (simple async router)  │
+│ ├─ Classify query type              │
+│ ├─ Route to appropriate handler     │
+│ └─ Manage execution flow            │
 └─────────────────────────────────────┘
     │
-    ▼
-┌─────────────────────────────────────┐
-│ EXECUTOR AGENTS (Claude Haiku, x4)  │
-│ ├─ Execute plan steps in parallel   │
-│ ├─ Call financial/web tools         │
-│ ├─ Handle tool-level errors         │
-│ └─ Output: Raw results + metadata   │
-└─────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────┐
-│ VALIDATOR AGENT (Claude Haiku)      │
-│ ├─ Verify data completeness         │
-│ ├─ Check against guardrails         │
-│ ├─ Validate compliance              │
-│ └─ Output: Pass/Fail + issues       │
-└─────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────┐
-│ SYNTHESIZER AGENT (Claude Opus 4.5) │
-│ ├─ Aggregate all results            │
-│ ├─ Generate final response          │
-│ ├─ Update long-term memory          │
-│ └─ Output: User-friendly response   │
-└─────────────────────────────────────┘
+    ├──────────────┬──────────────┐
+    ▼              ▼              ▼
+┌─────────┐  ┌──────────┐  ┌──────────┐
+│ SIMPLE  │  │ RESEARCH │  │ COMPLEX  │
+│ QUERY   │  │ QUERY    │  │ ANALYSIS │
+│         │  │          │  │          │
+│ Direct  │  │ Plan →   │  │ Plan →   │
+│ tool    │  │ Execute  │  │ Execute  │
+│ call    │  │ → Answer │  │ → Synth  │
+└─────────┘  └──────────┘  └──────────┘
 ```
 
-### Framework Recommendation: LangGraph
-
-Choose LangGraph for orchestration because:
-- Graph-based state management for complex workflows
-- Built-in support for parallel execution
-- LangSmith integration for observability
-- Superior error recovery patterns
-
-### Memory Architecture
+### Implementation
 
 ```typescript
-// Unified memory system
-interface AgentMemory {
-  // Current session (in-context)
-  shortTerm: {
-    currentQuery: string;
-    recentToolOutputs: ToolOutput[];
-    workingNotes: string;
-  };
+// lib/agents/orchestrator.ts
+import Anthropic from '@anthropic-ai/sdk';
 
-  // Persistent across sessions
-  longTerm: {
-    semantic: VectorStore;        // Embeddings for similarity search
-    episodic: PostgreSQL;         // Event history with timestamps
-    preferences: KeyValueStore;   // User preferences
-  };
+type QueryType = 'simple' | 'research' | 'complex';
 
-  // Compressed context
-  summaries: {
-    toolSummaries: Summary[];     // Compacted tool outputs
-    sessionSummary: string;       // End-of-session summary
-  };
+interface ExecutionContext {
+  query: string;
+  userId: string;
+  sessionId: string;
+  history: Message[];
 }
+
+interface ExecutionResult {
+  response: string;
+  toolsUsed: string[];
+  tokensUsed: number;
+  cached: boolean;
+}
+
+const anthropic = new Anthropic();
+
+export class AgentOrchestrator {
+  private tools: FinancialTools;
+  private cache: DataCache;
+
+  constructor(tools: FinancialTools, cache: DataCache) {
+    this.tools = tools;
+    this.cache = cache;
+  }
+
+  async execute(ctx: ExecutionContext): Promise<ExecutionResult> {
+    // Step 1: Classify the query
+    const queryType = await this.classifyQuery(ctx.query);
+
+    // Step 2: Route to appropriate handler
+    switch (queryType) {
+      case 'simple':
+        return this.handleSimpleQuery(ctx);
+      case 'research':
+        return this.handleResearchQuery(ctx);
+      case 'complex':
+        return this.handleComplexQuery(ctx);
+    }
+  }
+
+  private async classifyQuery(query: string): Promise<QueryType> {
+    // Use Haiku for fast classification
+    const response = await anthropic.messages.create({
+      model: 'claude-3-5-haiku-20241022',
+      max_tokens: 50,
+      system: `Classify the financial query into one category:
+- simple: Single data point (price, basic metric)
+- research: Multiple data points, one company
+- complex: Comparison, analysis, multiple companies
+
+Reply with only the category name.`,
+      messages: [{ role: 'user', content: query }],
+    });
+
+    const text = response.content[0].type === 'text'
+      ? response.content[0].text.trim().toLowerCase()
+      : 'research';
+
+    return ['simple', 'research', 'complex'].includes(text)
+      ? text as QueryType
+      : 'research';
+  }
+
+  // Simple: "What's Apple's stock price?"
+  private async handleSimpleQuery(ctx: ExecutionContext): Promise<ExecutionResult> {
+    const response = await anthropic.messages.create({
+      model: 'claude-3-5-haiku-20241022',
+      max_tokens: 1024,
+      system: SIMPLE_QUERY_PROMPT,
+      messages: [{ role: 'user', content: ctx.query }],
+      tools: this.tools.getSimpleTools(),
+    });
+
+    return this.processToolResponse(response, ctx);
+  }
+
+  // Research: "Give me Apple's financials and recent news"
+  private async handleResearchQuery(ctx: ExecutionContext): Promise<ExecutionResult> {
+    // Step 1: Plan what data we need (Haiku - fast)
+    const plan = await this.createPlan(ctx.query);
+
+    // Step 2: Execute tools in parallel
+    const results = await this.executeToolsPlan(plan);
+
+    // Step 3: Synthesize response (Opus - quality)
+    const response = await this.synthesize(ctx.query, results);
+
+    return response;
+  }
+
+  // Complex: "Compare Apple, Microsoft, and Google's P/E ratios"
+  private async handleComplexQuery(ctx: ExecutionContext): Promise<ExecutionResult> {
+    // Same as research but with more parallel execution
+    const plan = await this.createPlan(ctx.query);
+    const results = await this.executeToolsPlan(plan);
+    const validated = await this.validate(results);
+    const response = await this.synthesize(ctx.query, validated);
+
+    return response;
+  }
+
+  private async createPlan(query: string): Promise<ExecutionPlan> {
+    const response = await anthropic.messages.create({
+      model: 'claude-3-5-haiku-20241022',
+      max_tokens: 500,
+      system: PLANNER_PROMPT,
+      messages: [{ role: 'user', content: query }],
+    });
+
+    return JSON.parse(response.content[0].type === 'text'
+      ? response.content[0].text
+      : '{"steps":[]}');
+  }
+
+  private async executeToolsPlan(plan: ExecutionPlan): Promise<ToolResult[]> {
+    // Execute independent steps in parallel
+    const results = await Promise.all(
+      plan.steps.map(step => this.executeTool(step))
+    );
+    return results;
+  }
+
+  private async synthesize(query: string, results: ToolResult[]): Promise<ExecutionResult> {
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514', // Good balance of quality/cost
+      max_tokens: 2048,
+      system: SYNTHESIS_PROMPT,
+      messages: [{
+        role: 'user',
+        content: `Query: ${query}\n\nData:\n${JSON.stringify(results, null, 2)}`
+      }],
+    });
+
+    return {
+      response: response.content[0].type === 'text' ? response.content[0].text : '',
+      toolsUsed: results.map(r => r.tool),
+      tokensUsed: response.usage.input_tokens + response.usage.output_tokens,
+      cached: false,
+    };
+  }
+}
+```
+
+### Prompts
+
+```typescript
+// lib/agents/prompts.ts
+
+export const SIMPLE_QUERY_PROMPT = `You are a financial assistant.
+Answer the user's question using the available tools.
+Be concise and direct. Format numbers clearly.
+If you don't have enough data, say so.`;
+
+export const PLANNER_PROMPT = `You are a financial research planner.
+Given a query, output a JSON plan with tools to call.
+
+Available tools:
+- getQuote(ticker): Current price and basic stats
+- getFinancials(ticker): Income statement, balance sheet, cash flow
+- getNews(ticker): Recent news articles
+- getTechnicals(ticker, indicator): RSI, MACD, etc.
+- getProfile(ticker): Company info
+
+Output format:
+{
+  "steps": [
+    { "tool": "getQuote", "args": { "ticker": "AAPL" } },
+    { "tool": "getFinancials", "args": { "ticker": "AAPL" } }
+  ]
+}
+
+Only include necessary tools. Be efficient.`;
+
+export const SYNTHESIS_PROMPT = `You are a financial analyst.
+Synthesize the provided data into a clear, actionable response.
+
+Guidelines:
+- Lead with the most important insight
+- Use tables for comparisons
+- Format numbers: $1.2B, 15.3%, etc.
+- Include relevant context
+- Be concise but thorough
+- Add disclaimer if giving analysis (not financial advice)`;
+
+export const VALIDATION_PROMPT = `Check this financial data for:
+1. Missing critical fields
+2. Obvious data errors (negative prices, impossible ratios)
+3. Stale data (check timestamps)
+
+Output: { "valid": true/false, "issues": [] }`;
+```
+
+### Tool Definitions
+
+```typescript
+// lib/tools/definitions.ts
+import { Tool } from '@anthropic-ai/sdk';
+
+export const FINANCIAL_TOOLS: Tool[] = [
+  {
+    name: 'getQuote',
+    description: 'Get current stock price and basic stats',
+    input_schema: {
+      type: 'object',
+      properties: {
+        ticker: { type: 'string', description: 'Stock ticker symbol' }
+      },
+      required: ['ticker']
+    }
+  },
+  {
+    name: 'getFinancials',
+    description: 'Get financial statements (income, balance sheet, cash flow)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        ticker: { type: 'string' },
+        period: { type: 'string', enum: ['annual', 'quarterly'], default: 'annual' }
+      },
+      required: ['ticker']
+    }
+  },
+  {
+    name: 'getNews',
+    description: 'Get recent news articles for a company',
+    input_schema: {
+      type: 'object',
+      properties: {
+        ticker: { type: 'string' },
+        limit: { type: 'number', default: 5 }
+      },
+      required: ['ticker']
+    }
+  },
+  {
+    name: 'getTechnicals',
+    description: 'Get technical indicators (RSI, MACD, etc.)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        ticker: { type: 'string' },
+        indicator: { type: 'string', enum: ['RSI', 'MACD', 'SMA', 'EMA', 'BBANDS'] }
+      },
+      required: ['ticker', 'indicator']
+    }
+  },
+  {
+    name: 'compareStocks',
+    description: 'Compare metrics across multiple stocks',
+    input_schema: {
+      type: 'object',
+      properties: {
+        tickers: { type: 'array', items: { type: 'string' } },
+        metrics: { type: 'array', items: { type: 'string' } }
+      },
+      required: ['tickers', 'metrics']
+    }
+  }
+];
+```
+
+### Tool Executor
+
+```typescript
+// lib/tools/executor.ts
+
+export class ToolExecutor {
+  private dataAggregator: FinancialDataAggregator;
+
+  async execute(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    const startTime = Date.now();
+
+    try {
+      let data: unknown;
+
+      switch (toolName) {
+        case 'getQuote':
+          data = await this.dataAggregator.getQuote(args.ticker as string);
+          break;
+        case 'getFinancials':
+          data = await this.dataAggregator.getFinancials(
+            args.ticker as string,
+            args.period as string
+          );
+          break;
+        case 'getNews':
+          data = await this.dataAggregator.getNews(
+            args.ticker as string,
+            args.limit as number
+          );
+          break;
+        case 'getTechnicals':
+          data = await this.dataAggregator.getTechnicals(
+            args.ticker as string,
+            args.indicator as string
+          );
+          break;
+        case 'compareStocks':
+          data = await this.executeComparison(
+            args.tickers as string[],
+            args.metrics as string[]
+          );
+          break;
+        default:
+          throw new Error(`Unknown tool: ${toolName}`);
+      }
+
+      return {
+        tool: toolName,
+        success: true,
+        data,
+        duration: Date.now() - startTime,
+      };
+    } catch (error) {
+      return {
+        tool: toolName,
+        success: false,
+        error: error.message,
+        duration: Date.now() - startTime,
+      };
+    }
+  }
+
+  private async executeComparison(
+    tickers: string[],
+    metrics: string[]
+  ): Promise<ComparisonResult> {
+    // Fetch all data in parallel
+    const results = await Promise.all(
+      tickers.map(async ticker => ({
+        ticker,
+        quote: await this.dataAggregator.getQuote(ticker),
+        financials: await this.dataAggregator.getFinancials(ticker),
+      }))
+    );
+
+    // Extract requested metrics
+    return {
+      tickers,
+      metrics: metrics.map(metric => ({
+        name: metric,
+        values: results.map(r => this.extractMetric(r, metric)),
+      })),
+    };
+  }
+}
+```
+
+### Simple State Management (No Framework)
+
+```typescript
+// lib/state/session.ts
+
+interface SessionState {
+  id: string;
+  userId: string;
+  messages: Message[];
+  context: {
+    lastTickers: string[];
+    lastQuery: string;
+    toolResults: Map<string, ToolResult>;
+  };
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export class SessionManager {
+  private sessions: Map<string, SessionState> = new Map();
+  private db: Database;
+
+  async getOrCreate(sessionId: string, userId: string): Promise<SessionState> {
+    // Check memory first
+    if (this.sessions.has(sessionId)) {
+      return this.sessions.get(sessionId)!;
+    }
+
+    // Check database
+    const stored = await this.db.sessions.findUnique({ where: { id: sessionId } });
+    if (stored) {
+      const session = this.deserialize(stored);
+      this.sessions.set(sessionId, session);
+      return session;
+    }
+
+    // Create new
+    const session: SessionState = {
+      id: sessionId,
+      userId,
+      messages: [],
+      context: {
+        lastTickers: [],
+        lastQuery: '',
+        toolResults: new Map(),
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    this.sessions.set(sessionId, session);
+    await this.persist(session);
+    return session;
+  }
+
+  async addMessage(sessionId: string, message: Message): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    session.messages.push(message);
+    session.updatedAt = new Date();
+
+    // Keep last 20 messages in memory, persist all
+    if (session.messages.length > 20) {
+      session.messages = session.messages.slice(-20);
+    }
+
+    await this.persist(session);
+  }
+
+  async updateContext(sessionId: string, update: Partial<SessionState['context']>): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    session.context = { ...session.context, ...update };
+    session.updatedAt = new Date();
+  }
+}
+```
+
+### Model Selection Strategy
+
+```typescript
+// lib/config/models.ts
+
+export const MODEL_CONFIG = {
+  // Fast, cheap - for classification and simple queries
+  fast: {
+    model: 'claude-3-5-haiku-20241022',
+    maxTokens: 1024,
+    temperature: 0.1,
+  },
+
+  // Balanced - for most responses
+  balanced: {
+    model: 'claude-sonnet-4-20250514',
+    maxTokens: 2048,
+    temperature: 0.3,
+  },
+
+  // Quality - for complex analysis (use sparingly)
+  quality: {
+    model: 'claude-sonnet-4-20250514', // Sonnet is usually enough
+    maxTokens: 4096,
+    temperature: 0.4,
+  },
+} as const;
+
+// When to use each:
+// - fast: Query classification, validation, simple lookups
+// - balanced: Research queries, synthesis, most user interactions
+// - quality: Complex multi-company analysis, detailed reports
+```
+
+---
+
+## Part 4.5: Database Schema (Simple, No RAG)
+
+### Why No Vector Store / RAG
+
+For this financial agent:
+- Data is **structured** (numbers, dates, categories)
+- Queries are **explicit** ("Apple's P/E ratio" not "companies like Apple")
+- Financial data has **clear schemas** (SEC standardized)
+- PostgreSQL JSONB handles semi-structured data well
+- We cache API responses, not embeddings
+
+### PostgreSQL Schema
+
+```sql
+-- Users and sessions
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email VARCHAR(255) UNIQUE,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id),
+  messages JSONB DEFAULT '[]',
+  context JSONB DEFAULT '{}',
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Financial data cache
+CREATE TABLE financial_cache (
+  id SERIAL PRIMARY KEY,
+  cache_key VARCHAR(255) UNIQUE NOT NULL,  -- e.g., "quote:AAPL", "financials:MSFT:annual"
+  data_type VARCHAR(50) NOT NULL,           -- quote, financials, news, technicals, profile
+  ticker VARCHAR(10),
+  data JSONB NOT NULL,
+  source VARCHAR(50),                       -- sec-edgar, finnhub, yahoo
+  fetched_at TIMESTAMP DEFAULT NOW(),
+  expires_at TIMESTAMP NOT NULL,
+
+  INDEX idx_cache_key (cache_key),
+  INDEX idx_ticker (ticker),
+  INDEX idx_expires (expires_at)
+);
+
+-- Query history for analytics
+CREATE TABLE query_log (
+  id SERIAL PRIMARY KEY,
+  session_id UUID REFERENCES sessions(id),
+  query TEXT NOT NULL,
+  query_type VARCHAR(20),                   -- simple, research, complex
+  tools_used TEXT[],
+  tokens_used INTEGER,
+  response_time_ms INTEGER,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Watchlists (user feature)
+CREATE TABLE watchlists (
+  id SERIAL PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  name VARCHAR(100),
+  tickers TEXT[],
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+### Cache Implementation
+
+```typescript
+// lib/cache/postgres-cache.ts
+import { Pool } from 'pg';
+
+const CACHE_TTL: Record<string, number> = {
+  quote: 60,              // 1 minute
+  financials: 86400,      // 24 hours
+  news: 900,              // 15 minutes
+  technicals: 3600,       // 1 hour
+  profile: 2592000,       // 30 days
+  history: 604800,        // 7 days
+};
+
+export class PostgresCache {
+  private pool: Pool;
+
+  async get<T>(key: string, dataType: string): Promise<T | null> {
+    const result = await this.pool.query(
+      `SELECT data, fetched_at, expires_at
+       FROM financial_cache
+       WHERE cache_key = $1 AND expires_at > NOW()`,
+      [key]
+    );
+
+    if (result.rows.length === 0) return null;
+    return result.rows[0].data as T;
+  }
+
+  async set(key: string, dataType: string, data: unknown, ticker?: string, source?: string): Promise<void> {
+    const ttl = CACHE_TTL[dataType] || 3600;
+    const expiresAt = new Date(Date.now() + ttl * 1000);
+
+    await this.pool.query(
+      `INSERT INTO financial_cache (cache_key, data_type, ticker, data, source, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (cache_key)
+       DO UPDATE SET data = $4, source = $5, fetched_at = NOW(), expires_at = $6`,
+      [key, dataType, ticker, JSON.stringify(data), source, expiresAt]
+    );
+  }
+
+  async invalidate(pattern: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM financial_cache WHERE cache_key LIKE $1`,
+      [pattern]
+    );
+  }
+
+  async cleanup(): Promise<number> {
+    const result = await this.pool.query(
+      `DELETE FROM financial_cache WHERE expires_at < NOW()`
+    );
+    return result.rowCount || 0;
+  }
+}
+```
+
+### Redis for Hot Cache (Optional)
+
+```typescript
+// lib/cache/redis-cache.ts
+import { Redis } from 'ioredis';
+
+// Redis for frequently accessed data (quotes)
+// PostgreSQL for less frequent (financials, profiles)
+
+export class HotCache {
+  private redis: Redis;
+
+  async getQuote(ticker: string): Promise<Quote | null> {
+    const data = await this.redis.get(`quote:${ticker}`);
+    return data ? JSON.parse(data) : null;
+  }
+
+  async setQuote(ticker: string, quote: Quote): Promise<void> {
+    await this.redis.setex(`quote:${ticker}`, 60, JSON.stringify(quote));
+  }
+
+  // Rate limit tracking (must be in Redis for speed)
+  async trackRequest(source: string): Promise<boolean> {
+    const key = `ratelimit:${source}`;
+    const current = await this.redis.incr(key);
+
+    if (current === 1) {
+      await this.redis.expire(key, 60); // 1 minute window
+    }
+
+    return current <= RATE_LIMITS[source].maxPerMinute;
+  }
+}
+```
+
+### Data Flow Summary
+
+```
+User Query
+    │
+    ▼
+┌──────────────────┐
+│ Check Redis      │ ← Hot cache (quotes, rate limits)
+│ (milliseconds)   │
+└──────────────────┘
+    │ miss
+    ▼
+┌──────────────────┐
+│ Check PostgreSQL │ ← Warm cache (financials, profiles)
+│ (< 10ms)         │
+└──────────────────┘
+    │ miss
+    ▼
+┌──────────────────┐
+│ Fetch from API   │ ← SEC EDGAR → Finnhub → Yahoo
+│ (100-500ms)      │
+└──────────────────┘
+    │
+    ▼
+┌──────────────────┐
+│ Store in cache   │ ← Write to both Redis + PostgreSQL
+└──────────────────┘
 ```
 
 ---
