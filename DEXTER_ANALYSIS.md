@@ -1010,195 +1010,401 @@ export const MODEL_CONFIG = {
 
 ---
 
-## Part 4.5: Database Schema (Simple, No RAG)
+## Part 4.5: Database & Auth (Supabase)
 
-### Why No Vector Store / RAG
+### Why Supabase
 
-For this financial agent:
-- Data is **structured** (numbers, dates, categories)
-- Queries are **explicit** ("Apple's P/E ratio" not "companies like Apple")
-- Financial data has **clear schemas** (SEC standardized)
-- PostgreSQL JSONB handles semi-structured data well
-- We cache API responses, not embeddings
+- **PostgreSQL** - Same schema, hosted and managed
+- **Auth** - Built-in, no custom implementation needed
+- **RLS** - Row Level Security for user data protection
+- **Real-time** - Subscribe to changes (useful for watchlists)
+- **Free tier** - 500MB database, 50K monthly active users
 
-### PostgreSQL Schema
+### Setup
+
+```bash
+npm install @supabase/supabase-js
+```
+
+```typescript
+// lib/supabase/client.ts
+import { createClient } from '@supabase/supabase-js';
+import { Database } from './types';
+
+export const supabase = createClient<Database>(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
+
+// Server-side client (for API routes)
+export const supabaseAdmin = createClient<Database>(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
+```
+
+### Database Schema (Supabase SQL Editor)
 
 ```sql
--- Users and sessions
-CREATE TABLE users (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email VARCHAR(255) UNIQUE,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
+-- Sessions (auth.users is built-in)
 CREATE TABLE sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID REFERENCES users(id),
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
   messages JSONB DEFAULT '[]',
   context JSONB DEFAULT '{}',
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Financial data cache
+-- Financial data cache (public, no RLS needed)
 CREATE TABLE financial_cache (
   id SERIAL PRIMARY KEY,
-  cache_key VARCHAR(255) UNIQUE NOT NULL,  -- e.g., "quote:AAPL", "financials:MSFT:annual"
-  data_type VARCHAR(50) NOT NULL,           -- quote, financials, news, technicals, profile
-  ticker VARCHAR(10),
+  cache_key TEXT UNIQUE NOT NULL,
+  data_type TEXT NOT NULL,
+  ticker TEXT,
   data JSONB NOT NULL,
-  source VARCHAR(50),                       -- sec-edgar, finnhub, yahoo
-  fetched_at TIMESTAMP DEFAULT NOW(),
-  expires_at TIMESTAMP NOT NULL,
-
-  INDEX idx_cache_key (cache_key),
-  INDEX idx_ticker (ticker),
-  INDEX idx_expires (expires_at)
+  source TEXT,
+  fetched_at TIMESTAMPTZ DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL
 );
 
--- Query history for analytics
+CREATE INDEX idx_cache_key ON financial_cache(cache_key);
+CREATE INDEX idx_cache_expires ON financial_cache(expires_at);
+
+-- Query history
 CREATE TABLE query_log (
   id SERIAL PRIMARY KEY,
-  session_id UUID REFERENCES sessions(id),
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
   query TEXT NOT NULL,
-  query_type VARCHAR(20),                   -- simple, research, complex
+  query_type TEXT,
   tools_used TEXT[],
   tokens_used INTEGER,
   response_time_ms INTEGER,
-  created_at TIMESTAMP DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Watchlists (user feature)
+-- Watchlists
 CREATE TABLE watchlists (
   id SERIAL PRIMARY KEY,
-  user_id UUID REFERENCES users(id),
-  name VARCHAR(100),
-  tickers TEXT[],
-  created_at TIMESTAMP DEFAULT NOW()
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  tickers TEXT[] DEFAULT '{}',
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Row Level Security
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE query_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE watchlists ENABLE ROW LEVEL SECURITY;
+
+-- Users can only access their own data
+CREATE POLICY "Users access own sessions"
+  ON sessions FOR ALL
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users access own queries"
+  ON query_log FOR ALL
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users access own watchlists"
+  ON watchlists FOR ALL
+  USING (auth.uid() = user_id);
+
+-- Cache cleanup function (run via cron)
+CREATE OR REPLACE FUNCTION cleanup_expired_cache()
+RETURNS INTEGER AS $$
+DECLARE
+  deleted_count INTEGER;
+BEGIN
+  DELETE FROM financial_cache WHERE expires_at < NOW();
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  RETURN deleted_count;
+END;
+$$ LANGUAGE plpgsql;
 ```
 
-### Cache Implementation
+### Auth Implementation
 
 ```typescript
-// lib/cache/postgres-cache.ts
-import { Pool } from 'pg';
+// lib/auth/index.ts
+import { supabase } from '../supabase/client';
+
+export async function signInWithEmail(email: string) {
+  // Magic link (no password)
+  const { error } = await supabase.auth.signInWithOtp({
+    email,
+    options: {
+      emailRedirectTo: `${window.location.origin}/auth/callback`,
+    },
+  });
+  return { error };
+}
+
+export async function signInWithGoogle() {
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: `${window.location.origin}/auth/callback`,
+    },
+  });
+  return { error };
+}
+
+export async function signOut() {
+  await supabase.auth.signOut();
+}
+
+export async function getUser() {
+  const { data: { user } } = await supabase.auth.getUser();
+  return user;
+}
+```
+
+```typescript
+// app/auth/callback/route.ts
+import { createClient } from '@/lib/supabase/server';
+import { NextResponse } from 'next/server';
+
+export async function GET(request: Request) {
+  const { searchParams, origin } = new URL(request.url);
+  const code = searchParams.get('code');
+
+  if (code) {
+    const supabase = await createClient();
+    await supabase.auth.exchangeCodeForSession(code);
+  }
+
+  return NextResponse.redirect(`${origin}/dashboard`);
+}
+```
+
+### Cache with Supabase
+
+```typescript
+// lib/cache/supabase-cache.ts
+import { supabaseAdmin } from '../supabase/client';
 
 const CACHE_TTL: Record<string, number> = {
-  quote: 60,              // 1 minute
-  financials: 86400,      // 24 hours
-  news: 900,              // 15 minutes
-  technicals: 3600,       // 1 hour
-  profile: 2592000,       // 30 days
-  history: 604800,        // 7 days
+  quote: 60,
+  financials: 86400,
+  news: 900,
+  technicals: 3600,
+  profile: 2592000,
+  history: 604800,
 };
 
-export class PostgresCache {
-  private pool: Pool;
+export class SupabaseCache {
+  async get<T>(key: string): Promise<T | null> {
+    const { data } = await supabaseAdmin
+      .from('financial_cache')
+      .select('data')
+      .eq('cache_key', key)
+      .gt('expires_at', new Date().toISOString())
+      .single();
 
-  async get<T>(key: string, dataType: string): Promise<T | null> {
-    const result = await this.pool.query(
-      `SELECT data, fetched_at, expires_at
-       FROM financial_cache
-       WHERE cache_key = $1 AND expires_at > NOW()`,
-      [key]
-    );
-
-    if (result.rows.length === 0) return null;
-    return result.rows[0].data as T;
+    return data?.data as T | null;
   }
 
-  async set(key: string, dataType: string, data: unknown, ticker?: string, source?: string): Promise<void> {
+  async set(
+    key: string,
+    dataType: string,
+    data: unknown,
+    ticker?: string,
+    source?: string
+  ): Promise<void> {
     const ttl = CACHE_TTL[dataType] || 3600;
-    const expiresAt = new Date(Date.now() + ttl * 1000);
+    const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
 
-    await this.pool.query(
-      `INSERT INTO financial_cache (cache_key, data_type, ticker, data, source, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (cache_key)
-       DO UPDATE SET data = $4, source = $5, fetched_at = NOW(), expires_at = $6`,
-      [key, dataType, ticker, JSON.stringify(data), source, expiresAt]
-    );
+    await supabaseAdmin
+      .from('financial_cache')
+      .upsert({
+        cache_key: key,
+        data_type: dataType,
+        ticker,
+        data,
+        source,
+        fetched_at: new Date().toISOString(),
+        expires_at: expiresAt,
+      }, {
+        onConflict: 'cache_key',
+      });
   }
 
-  async invalidate(pattern: string): Promise<void> {
-    await this.pool.query(
-      `DELETE FROM financial_cache WHERE cache_key LIKE $1`,
-      [pattern]
-    );
-  }
-
-  async cleanup(): Promise<number> {
-    const result = await this.pool.query(
-      `DELETE FROM financial_cache WHERE expires_at < NOW()`
-    );
-    return result.rowCount || 0;
+  async invalidate(ticker: string): Promise<void> {
+    await supabaseAdmin
+      .from('financial_cache')
+      .delete()
+      .like('cache_key', `%${ticker}%`);
   }
 }
 ```
 
-### Redis for Hot Cache (Optional)
+### Session Management
 
 ```typescript
-// lib/cache/redis-cache.ts
-import { Redis } from 'ioredis';
+// lib/sessions/index.ts
+import { supabase } from '../supabase/client';
 
-// Redis for frequently accessed data (quotes)
-// PostgreSQL for less frequent (financials, profiles)
+export async function getOrCreateSession(userId: string): Promise<Session> {
+  // Get most recent session or create new
+  const { data: existing } = await supabase
+    .from('sessions')
+    .select('*')
+    .eq('user_id', userId)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .single();
 
-export class HotCache {
-  private redis: Redis;
+  if (existing) return existing;
 
-  async getQuote(ticker: string): Promise<Quote | null> {
-    const data = await this.redis.get(`quote:${ticker}`);
-    return data ? JSON.parse(data) : null;
-  }
+  const { data: newSession } = await supabase
+    .from('sessions')
+    .insert({ user_id: userId })
+    .select()
+    .single();
 
-  async setQuote(ticker: string, quote: Quote): Promise<void> {
-    await this.redis.setex(`quote:${ticker}`, 60, JSON.stringify(quote));
-  }
+  return newSession!;
+}
 
-  // Rate limit tracking (must be in Redis for speed)
-  async trackRequest(source: string): Promise<boolean> {
-    const key = `ratelimit:${source}`;
-    const current = await this.redis.incr(key);
+export async function addMessage(
+  sessionId: string,
+  message: Message
+): Promise<void> {
+  const { data: session } = await supabase
+    .from('sessions')
+    .select('messages')
+    .eq('id', sessionId)
+    .single();
 
-    if (current === 1) {
-      await this.redis.expire(key, 60); // 1 minute window
-    }
+  const messages = [...(session?.messages || []), message].slice(-50); // Keep last 50
 
-    return current <= RATE_LIMITS[source].maxPerMinute;
-  }
+  await supabase
+    .from('sessions')
+    .update({
+      messages,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', sessionId);
+}
+
+export async function logQuery(
+  userId: string,
+  sessionId: string,
+  query: string,
+  queryType: string,
+  toolsUsed: string[],
+  tokensUsed: number,
+  responseTimeMs: number
+): Promise<void> {
+  await supabase.from('query_log').insert({
+    user_id: userId,
+    session_id: sessionId,
+    query,
+    query_type: queryType,
+    tools_used: toolsUsed,
+    tokens_used: tokensUsed,
+    response_time_ms: responseTimeMs,
+  });
 }
 ```
 
-### Data Flow Summary
+### Watchlist with Real-time
+
+```typescript
+// lib/watchlists/index.ts
+import { supabase } from '../supabase/client';
+
+export async function getWatchlists(userId: string) {
+  const { data } = await supabase
+    .from('watchlists')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
+
+  return data || [];
+}
+
+export async function createWatchlist(userId: string, name: string, tickers: string[]) {
+  const { data } = await supabase
+    .from('watchlists')
+    .insert({ user_id: userId, name, tickers })
+    .select()
+    .single();
+
+  return data;
+}
+
+export async function addToWatchlist(watchlistId: number, ticker: string) {
+  const { data: watchlist } = await supabase
+    .from('watchlists')
+    .select('tickers')
+    .eq('id', watchlistId)
+    .single();
+
+  const tickers = [...new Set([...(watchlist?.tickers || []), ticker])];
+
+  await supabase
+    .from('watchlists')
+    .update({ tickers })
+    .eq('id', watchlistId);
+}
+
+// Real-time subscription for watchlist updates
+export function subscribeToWatchlist(
+  watchlistId: number,
+  callback: (payload: any) => void
+) {
+  return supabase
+    .channel(`watchlist:${watchlistId}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'watchlists',
+        filter: `id=eq.${watchlistId}`,
+      },
+      callback
+    )
+    .subscribe();
+}
+```
+
+### Type Generation
+
+```bash
+# Generate TypeScript types from Supabase schema
+npx supabase gen types typescript --project-id your-project-id > lib/supabase/types.ts
+```
+
+### Architecture Summary
 
 ```
-User Query
-    │
-    ▼
-┌──────────────────┐
-│ Check Redis      │ ← Hot cache (quotes, rate limits)
-│ (milliseconds)   │
-└──────────────────┘
-    │ miss
-    ▼
-┌──────────────────┐
-│ Check PostgreSQL │ ← Warm cache (financials, profiles)
-│ (< 10ms)         │
-└──────────────────┘
-    │ miss
-    ▼
-┌──────────────────┐
-│ Fetch from API   │ ← SEC EDGAR → Finnhub → Yahoo
-│ (100-500ms)      │
-└──────────────────┘
-    │
-    ▼
-┌──────────────────┐
-│ Store in cache   │ ← Write to both Redis + PostgreSQL
-└──────────────────┘
+┌─────────────────────────────────────────────────┐
+│                  SUPABASE                        │
+├─────────────────────────────────────────────────┤
+│                                                  │
+│  ┌─────────────┐  ┌─────────────┐               │
+│  │    Auth     │  │  Database   │               │
+│  │             │  │ (PostgreSQL)│               │
+│  │ • Google    │  │             │               │
+│  │ • Magic Link│  │ • sessions  │               │
+│  │ • Email/Pass│  │ • cache     │               │
+│  └─────────────┘  │ • queries   │               │
+│                   │ • watchlists│               │
+│                   └─────────────┘               │
+│                         │                        │
+│                    RLS (Row Level Security)      │
+│                         │                        │
+└─────────────────────────┴───────────────────────┘
+                          │
+                          ▼
+              ┌───────────────────────┐
+              │   Next.js Frontend    │
+              │   • @supabase/ssr     │
+              │   • Real-time subs    │
+              └───────────────────────┘
 ```
 
 ---
