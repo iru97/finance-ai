@@ -132,62 +132,130 @@ const LLM_CONFIG = {
 
 ## Part 3: Financial Data API Recommendations
 
-### Recommended Production Stack
+### Recommended Stack: 100% FREE Option
 
-**Primary: Financial Modeling Prep ($19/month)**
+**Total Monthly Cost: $0**
+
+| API | Rate Limit | Best For | Data Coverage |
+|-----|------------|----------|---------------|
+| **yfinance** | Unlimited (scraping) | Historical prices, dividends | US stocks, basic fundamentals |
+| **Finnhub** | 60 calls/min | Real-time quotes, news | Global, multi-asset |
+| **SEC EDGAR** | 10 req/sec | Financial statements | All US public companies |
+| **Alpha Vantage** | 25 calls/day | Technical indicators | 50+ indicators |
+| **Marketaux** | Free | News sentiment | Global news |
+
+### Free API Details
+
+**1. yfinance (Python) - Historical Data**
+```bash
+pip install yfinance
+```
+- Unlimited calls (web scraping)
+- Historical prices, dividends, splits, basic fundamentals
+- Not for production (may break if Yahoo changes site)
+- GitHub: https://github.com/ranaroussi/yfinance
+
+**2. Finnhub - MOST GENEROUS FREE TIER**
+- 60 API calls/minute (best free rate limit)
+- Real-time stock prices, fundamentals, news
+- International markets, crypto
+- Website: https://finnhub.io/
+
+**3. SEC EDGAR API - DEEP FUNDAMENTALS (NO API KEY)**
+- 10 requests/second, completely free
+- 18+ million filings back to 1993
+- Income statements, balance sheets, cash flow
+- Direct access: `https://data.sec.gov/submissions/CIK##########.json`
+- Bulk download: `companyfacts.zip` (all company data)
+
+**4. Alpha Vantage - TECHNICAL INDICATORS**
+- 25 calls/day free (limited but useful)
+- 50+ technical indicators (RSI, MACD, Bollinger, etc.)
+- Official MCP server for AI agents
+- Website: https://www.alphavantage.co/
+
+**5. Marketaux - FREE NEWS SENTIMENT**
+- 100% free sentiment analysis
+- Global stock, fund, crypto news
+- Website: https://www.marketaux.com
+
+### Budget Option (~$20/month)
+
+If you need more capacity:
+
+**EODHD Pro (€17.99/month ~ $19.50)**
 - Unlimited API calls
-- 30+ years historical data
-- Fundamentals, SEC filings, insider trading
-- Real-time quotes
+- 150,000+ tickers globally
+- Bulk download capability
+- Website: https://eodhd.com/
 
-**Secondary: Finnhub ($0-50/month)**
-- 60 req/min free tier
-- Real-time news and sentiment
-- Analyst estimates
-- Company fundamentals
+### Open Source Alternative: OpenBB
 
-**Specialized: Alpha Vantage ($49/month)**
-- 50+ technical indicators
-- NASDAQ-backed reliability
-- Global market coverage
+**OpenBB Terminal** - Free Bloomberg Alternative
+- 100% free, open source
+- Integrates multiple data providers
+- AI-powered research workspace
+- GitHub: https://github.com/OpenBB-finance/OpenBB
 
-**Crypto: CoinGecko ($129/month for production)**
-- 30 req/min free tier
-- Multi-exchange data
-- Market cap and volume
-
-### Total Monthly Cost: ~$197-250 for comprehensive coverage
-
-### API Integration Pattern
+### Recommended Free Stack Implementation
 
 ```typescript
-// Multi-source financial data aggregator
-interface FinancialDataSource {
-  name: string;
-  priority: number;
-  healthCheck(): Promise<boolean>;
-  getFinancials(ticker: string): Promise<FinancialData>;
-}
-
-const dataSources: FinancialDataSource[] = [
-  { name: 'fmp', priority: 1, ... },      // Primary
-  { name: 'finnhub', priority: 2, ... },  // Fallback
-  { name: 'eodhd', priority: 3, ... },    // Backup
+// Priority-based free data sources
+const FREE_DATA_SOURCES = [
+  {
+    name: 'finnhub',
+    priority: 1,
+    rateLimit: '60/min',
+    endpoints: ['quotes', 'fundamentals', 'news'],
+  },
+  {
+    name: 'sec-edgar',
+    priority: 2,
+    rateLimit: '10/sec',
+    endpoints: ['financials', 'filings'],
+  },
+  {
+    name: 'alpha-vantage',
+    priority: 3,
+    rateLimit: '25/day',
+    endpoints: ['technicals', 'indicators'],
+  },
+  {
+    name: 'yfinance',
+    priority: 4,
+    rateLimit: 'unlimited',
+    endpoints: ['history', 'dividends'],
+  },
 ];
 
-// Circuit breaker pattern for resilience
-async function getFinancials(ticker: string): Promise<FinancialData> {
-  for (const source of dataSources) {
-    if (await circuitBreaker.isOpen(source.name)) continue;
-    try {
-      return await source.getFinancials(ticker);
-    } catch (error) {
-      circuitBreaker.recordFailure(source.name);
-    }
+// Smart routing based on data type needed
+function getDataSource(dataType: string): DataSource {
+  switch (dataType) {
+    case 'realtime':
+      return finnhub;        // Best rate limit
+    case 'financials':
+      return secEdgar;       // Deepest data, no key needed
+    case 'technicals':
+      return alphaVantage;   // Best indicators
+    case 'history':
+      return yfinance;       // Unlimited historical
+    default:
+      return finnhub;
   }
-  throw new Error('All data sources unavailable');
 }
 ```
+
+### API Comparison Table
+
+| Feature | Finnhub | SEC EDGAR | Alpha Vantage | yfinance |
+|---------|---------|-----------|---------------|----------|
+| Rate Limit | 60/min | 10/sec | 25/day | Unlimited |
+| API Key | Yes | No | Yes | No |
+| Real-time | Yes | No | Limited | No |
+| Fundamentals | Basic | Deep | No | Basic |
+| Technicals | No | No | 50+ | No |
+| News | Yes | No | Yes | No |
+| Production Ready | Yes | Yes | Limited | No |
 
 ---
 
@@ -276,6 +344,42 @@ interface AgentMemory {
 
 ## Part 5: UI/UX Architecture
 
+### Vercel Agent Skills for Claude (January 2026)
+
+Vercel released official **Agent Skills** - an "npm for AI agents" with 10+ years of React/Next.js expertise.
+
+**Installation:**
+```bash
+npx add-skill vercel-labs/agent-skills -a claude-code
+```
+
+**Three Official Skills:**
+
+| Skill | What It Does |
+|-------|--------------|
+| **react-best-practices** | 45 rules across 8 categories for React/Next.js optimization |
+| **web-design-guidelines** | 100+ UI/UX audit rules for accessibility and design |
+| **vercel-deploy-claimable** | Deploy to Vercel with ownership transfer |
+
+**Key Optimization Rules (react-best-practices):**
+
+1. **CRITICAL: Eliminating Waterfalls**
+   - Sequential awaits compound network latency
+   - Parallelize data fetching instead of chaining
+
+2. **HIGH: Bundle Size Optimization**
+   - Lazy load heavy modules after hydration
+   - Use `typeof window !== 'undefined'` checks
+
+3. **MEDIUM: Re-render Optimization**
+   - Store callbacks in refs when used in effects
+   - Lazy state initialization: `useState(() => JSON.parse(...))`
+
+**How Skills Work:**
+- Install to `~/.claude/skills/`
+- Auto-activate when relevant to your task
+- Claude references patterns when reviewing/writing code
+
 ### Recommended Stack
 
 ```
@@ -288,6 +392,7 @@ interface AgentMemory {
 │ Charts:        Recharts (dashboard) + TanStack (data)   │
 │ State:         TanStack Query + Zustand                 │
 │ AI Chat:       Vercel AI SDK 6 (useChat hook)           │
+│ Skills:        vercel-labs/agent-skills (Claude)        │
 └─────────────────────────────────────────────────────────┘
                           │
                           ▼
