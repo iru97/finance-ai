@@ -7,6 +7,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { useToaster } from '@/components/ui/toaster'
 import { ThemeToggle } from '@/components/ui/theme-toggle'
+import { Markdown } from '@/components/ui/markdown'
 import { cn } from '@/lib/utils'
 
 interface Message {
@@ -212,12 +213,13 @@ export function ChatInterface({
                           : 'bg-surface border border-border'
                       )}
                     >
-                      <p className={cn(
-                        'whitespace-pre-wrap text-sm leading-relaxed',
-                        message.role === 'assistant' && 'text-text-primary'
-                      )}>
-                        {message.content}
-                      </p>
+                      {message.role === 'user' ? (
+                        <p className="whitespace-pre-wrap text-sm leading-relaxed">
+                          {message.content}
+                        </p>
+                      ) : (
+                        <Markdown content={message.content} />
+                      )}
                     </div>
                   </div>
                 ))}
