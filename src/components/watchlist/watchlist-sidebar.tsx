@@ -145,7 +145,7 @@ export function WatchlistSidebar({ onTickerClick }: WatchlistSidebarProps) {
 
   if (isLoading) {
     return (
-      <div className="w-64 border-r border-border bg-surface p-4">
+      <div className="h-full p-4">
         <div className="animate-pulse space-y-4">
           <div className="h-6 bg-background rounded" />
           <div className="h-20 bg-background rounded" />
@@ -156,7 +156,7 @@ export function WatchlistSidebar({ onTickerClick }: WatchlistSidebarProps) {
   }
 
   return (
-    <div className="w-64 border-r border-border bg-surface flex flex-col">
+    <div className="h-full flex flex-col">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-border">
         <div className="flex items-center gap-2">

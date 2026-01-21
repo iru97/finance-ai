@@ -42,7 +42,7 @@ export function SessionSidebar({
 
   if (isLoading) {
     return (
-      <div className="w-64 border-r border-border bg-surface p-4">
+      <div className="h-full p-4">
         <div className="animate-pulse space-y-3">
           <div className="h-10 bg-background rounded-lg" />
           <div className="h-16 bg-background rounded-lg" />
@@ -54,7 +54,7 @@ export function SessionSidebar({
   }
 
   return (
-    <div className="w-64 border-r border-border bg-surface flex flex-col">
+    <div className="h-full flex flex-col">
       {/* Header */}
       <div className="p-3 border-b border-border">
         <Button

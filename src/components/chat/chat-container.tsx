@@ -1,13 +1,17 @@
 'use client'
 
 import { useState, useCallback, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 import { useSessions, type Message } from '@/hooks/use-sessions'
 import { SessionSidebar } from './session-sidebar'
 import { ChatInterface } from './chat-interface'
-import { Menu, X } from 'lucide-react'
+import { WatchlistSidebar } from '@/components/watchlist/watchlist-sidebar'
+import { Menu, X, Star, MessageSquare } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { useToaster } from '@/components/ui/toaster'
+
+type SidebarTab = 'sessions' | 'watchlists'
 
 interface ChatContainerProps {
   userId: string
@@ -15,6 +19,7 @@ interface ChatContainerProps {
 }
 
 export function ChatContainer({ userId, userEmail }: ChatContainerProps) {
+  const router = useRouter()
   const {
     sessions,
     currentSession,
@@ -28,7 +33,12 @@ export function ChatContainer({ userId, userEmail }: ChatContainerProps) {
   const toaster = useToaster()
 
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('sessions')
   const [messages, setMessages] = useState<Message[]>([])
+
+  const handleTickerClick = useCallback((ticker: string) => {
+    router.push(`/research/${ticker}`)
+  }, [router])
 
   // Sync messages with current session
   useEffect(() => {
@@ -107,16 +117,51 @@ export function ChatContainer({ userId, userEmail }: ChatContainerProps) {
           />
         )}
         
-        <div className="relative z-10 flex">
-          <SessionSidebar
-            sessions={sessions}
-            currentSessionId={currentSession?.id}
-            isLoading={isLoading}
-            onSelectSession={handleSelectSession}
-            onNewSession={handleNewSession}
-            onDeleteSession={handleDeleteSession}
-          />
-          
+        <div className="relative z-10 flex flex-col w-64 bg-surface border-r border-border">
+          {/* Sidebar Tabs */}
+          <div className="flex border-b border-border">
+            <button
+              onClick={() => setSidebarTab('sessions')}
+              className={cn(
+                'flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-colors',
+                sidebarTab === 'sessions'
+                  ? 'text-accent border-b-2 border-accent'
+                  : 'text-text-secondary hover:text-text-primary'
+              )}
+            >
+              <MessageSquare className="h-4 w-4" />
+              Chats
+            </button>
+            <button
+              onClick={() => setSidebarTab('watchlists')}
+              className={cn(
+                'flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-colors',
+                sidebarTab === 'watchlists'
+                  ? 'text-accent border-b-2 border-accent'
+                  : 'text-text-secondary hover:text-text-primary'
+              )}
+            >
+              <Star className="h-4 w-4" />
+              Watchlists
+            </button>
+          </div>
+
+          {/* Sidebar Content */}
+          <div className="flex-1 overflow-hidden">
+            {sidebarTab === 'sessions' ? (
+              <SessionSidebar
+                sessions={sessions}
+                currentSessionId={currentSession?.id}
+                isLoading={isLoading}
+                onSelectSession={handleSelectSession}
+                onNewSession={handleNewSession}
+                onDeleteSession={handleDeleteSession}
+              />
+            ) : (
+              <WatchlistSidebar onTickerClick={handleTickerClick} />
+            )}
+          </div>
+
           {/* Mobile close button */}
           <Button
             variant="ghost"
