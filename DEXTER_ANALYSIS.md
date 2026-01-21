@@ -132,130 +132,374 @@ const LLM_CONFIG = {
 
 ## Part 3: Financial Data API Recommendations
 
-### Recommended Stack: 100% FREE Option
+### 100% FREE Stack - Final Selection
 
 **Total Monthly Cost: $0**
 
-| API | Rate Limit | Best For | Data Coverage |
-|-----|------------|----------|---------------|
-| **yfinance** | Unlimited (scraping) | Historical prices, dividends | US stocks, basic fundamentals |
-| **Finnhub** | 60 calls/min | Real-time quotes, news | Global, multi-asset |
-| **SEC EDGAR** | 10 req/sec | Financial statements | All US public companies |
-| **Alpha Vantage** | 25 calls/day | Technical indicators | 50+ indicators |
-| **Marketaux** | Free | News sentiment | Global news |
+| Priority | API | Rate Limit | Best For | Why Chosen |
+|----------|-----|------------|----------|------------|
+| 1 | **SEC EDGAR** | 10 req/sec | Financials | NO API KEY, deepest data |
+| 2 | **Finnhub** | 60/min | Real-time, news | Best free rate limit |
+| 3 | **Yahoo Finance** | Unlimited | History, prices | Backup for everything |
+| 4 | **Alpha Vantage** | 25/day | Technicals only | Cache aggressively |
 
-### Free API Details
+### Selected APIs - Details
 
-**1. yfinance (Python) - Historical Data**
-```bash
-pip install yfinance
+**1. SEC EDGAR (PRIMARY for fundamentals)**
 ```
-- Unlimited calls (web scraping)
-- Historical prices, dividends, splits, basic fundamentals
-- Not for production (may break if Yahoo changes site)
-- GitHub: https://github.com/ranaroussi/yfinance
-
-**2. Finnhub - MOST GENEROUS FREE TIER**
-- 60 API calls/minute (best free rate limit)
-- Real-time stock prices, fundamentals, news
-- International markets, crypto
-- Website: https://finnhub.io/
-
-**3. SEC EDGAR API - DEEP FUNDAMENTALS (NO API KEY)**
-- 10 requests/second, completely free
-- 18+ million filings back to 1993
+Endpoint: https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json
+Rate: 10 requests/second (NO API KEY NEEDED)
+```
 - Income statements, balance sheets, cash flow
-- Direct access: `https://data.sec.gov/submissions/CIK##########.json`
-- Bulk download: `companyfacts.zip` (all company data)
+- 18M+ filings back to 1993
+- Bulk download available: `companyfacts.zip`
 
-**4. Alpha Vantage - TECHNICAL INDICATORS**
-- 25 calls/day free (limited but useful)
-- 50+ technical indicators (RSI, MACD, Bollinger, etc.)
-- Official MCP server for AI agents
-- Website: https://www.alphavantage.co/
+**2. Finnhub (PRIMARY for real-time)**
+```
+Endpoint: https://finnhub.io/api/v1/
+Rate: 60 calls/minute free
+```
+- Real-time quotes, company news
+- Basic fundamentals, earnings
+- Crypto prices included
 
-**5. Marketaux - FREE NEWS SENTIMENT**
-- 100% free sentiment analysis
-- Global stock, fund, crypto news
-- Website: https://www.marketaux.com
+**3. Yahoo Finance via yfinance (BACKUP)**
+```bash
+pip install yfinance  # or use yahoo-finance npm
+```
+- Unlimited (scraping-based)
+- Use as fallback when rate limited elsewhere
 
-### Budget Option (~$20/month)
+**4. Alpha Vantage (TECHNICALS ONLY)**
+```
+Rate: 25 calls/day (VERY LIMITED - cache everything)
+```
+- RSI, MACD, Bollinger, 50+ indicators
+- Only call when user explicitly requests technicals
 
-If you need more capacity:
+---
 
-**EODHD Pro (€17.99/month ~ $19.50)**
-- Unlimited API calls
-- 150,000+ tickers globally
-- Bulk download capability
-- Website: https://eodhd.com/
-
-### Open Source Alternative: OpenBB
-
-**OpenBB Terminal** - Free Bloomberg Alternative
-- 100% free, open source
-- Integrates multiple data providers
-- AI-powered research workspace
-- GitHub: https://github.com/OpenBB-finance/OpenBB
-
-### Recommended Free Stack Implementation
+### Rate Limit Management System
 
 ```typescript
-// Priority-based free data sources
-const FREE_DATA_SOURCES = [
-  {
-    name: 'finnhub',
-    priority: 1,
-    rateLimit: '60/min',
-    endpoints: ['quotes', 'fundamentals', 'news'],
-  },
-  {
-    name: 'sec-edgar',
-    priority: 2,
-    rateLimit: '10/sec',
-    endpoints: ['financials', 'filings'],
-  },
-  {
-    name: 'alpha-vantage',
-    priority: 3,
-    rateLimit: '25/day',
-    endpoints: ['technicals', 'indicators'],
-  },
-  {
-    name: 'yfinance',
-    priority: 4,
-    rateLimit: 'unlimited',
-    endpoints: ['history', 'dividends'],
-  },
-];
+import { Redis } from 'ioredis';
 
-// Smart routing based on data type needed
-function getDataSource(dataType: string): DataSource {
-  switch (dataType) {
-    case 'realtime':
-      return finnhub;        // Best rate limit
-    case 'financials':
-      return secEdgar;       // Deepest data, no key needed
-    case 'technicals':
-      return alphaVantage;   // Best indicators
-    case 'history':
-      return yfinance;       // Unlimited historical
-    default:
-      return finnhub;
+interface RateLimitConfig {
+  maxRequests: number;
+  windowMs: number;
+  burstAllowed: number;
+}
+
+const RATE_LIMITS: Record<string, RateLimitConfig> = {
+  'sec-edgar': { maxRequests: 10, windowMs: 1000, burstAllowed: 5 },
+  'finnhub': { maxRequests: 60, windowMs: 60000, burstAllowed: 10 },
+  'alpha-vantage': { maxRequests: 25, windowMs: 86400000, burstAllowed: 1 },
+  'yfinance': { maxRequests: 1000, windowMs: 60000, burstAllowed: 50 }, // Self-imposed
+};
+
+class RateLimiter {
+  private redis: Redis;
+
+  constructor() {
+    this.redis = new Redis(process.env.REDIS_URL);
+  }
+
+  async canMakeRequest(source: string): Promise<boolean> {
+    const key = `ratelimit:${source}`;
+    const config = RATE_LIMITS[source];
+    const current = await this.redis.incr(key);
+
+    if (current === 1) {
+      await this.redis.pexpire(key, config.windowMs);
+    }
+
+    return current <= config.maxRequests;
+  }
+
+  async waitForSlot(source: string): Promise<void> {
+    while (!(await this.canMakeRequest(source))) {
+      const ttl = await this.redis.pttl(`ratelimit:${source}`);
+      await new Promise(r => setTimeout(r, Math.min(ttl, 1000)));
+    }
+  }
+
+  async getRemainingCalls(source: string): Promise<number> {
+    const current = await this.redis.get(`ratelimit:${source}`);
+    const config = RATE_LIMITS[source];
+    return config.maxRequests - (parseInt(current || '0'));
   }
 }
 ```
 
-### API Comparison Table
+---
 
-| Feature | Finnhub | SEC EDGAR | Alpha Vantage | yfinance |
-|---------|---------|-----------|---------------|----------|
-| Rate Limit | 60/min | 10/sec | 25/day | Unlimited |
-| API Key | Yes | No | Yes | No |
-| Real-time | Yes | No | Limited | No |
-| Fundamentals | Basic | Deep | No | Basic |
-| Technicals | No | No | 50+ | No |
-| News | Yes | No | Yes | No |
-| Production Ready | Yes | Yes | Limited | No |
+### Intelligent Caching Strategy
+
+```typescript
+interface CacheConfig {
+  ttl: number;        // Time-to-live in seconds
+  staleWhileRevalidate: number;  // Serve stale while fetching fresh
+}
+
+const CACHE_STRATEGY: Record<string, CacheConfig> = {
+  // Financials change quarterly - cache for 24h
+  'financials': { ttl: 86400, staleWhileRevalidate: 3600 },
+
+  // Prices are semi-real-time - cache for 1 minute
+  'quote': { ttl: 60, staleWhileRevalidate: 30 },
+
+  // Historical data never changes - cache for 7 days
+  'history': { ttl: 604800, staleWhileRevalidate: 86400 },
+
+  // Technicals - cache for 1 hour (computed from prices)
+  'technicals': { ttl: 3600, staleWhileRevalidate: 300 },
+
+  // News - cache for 15 minutes
+  'news': { ttl: 900, staleWhileRevalidate: 300 },
+
+  // Company profile - cache for 30 days
+  'profile': { ttl: 2592000, staleWhileRevalidate: 86400 },
+};
+
+class DataCache {
+  private redis: Redis;
+
+  async get<T>(key: string, dataType: string): Promise<T | null> {
+    const cached = await this.redis.get(key);
+    if (!cached) return null;
+
+    const { data, timestamp } = JSON.parse(cached);
+    const config = CACHE_STRATEGY[dataType];
+    const age = Date.now() - timestamp;
+
+    // Fresh data
+    if (age < config.ttl * 1000) {
+      return data;
+    }
+
+    // Stale but usable - trigger background refresh
+    if (age < (config.ttl + config.staleWhileRevalidate) * 1000) {
+      this.triggerBackgroundRefresh(key, dataType);
+      return data;  // Return stale data immediately
+    }
+
+    return null;  // Too old, must fetch fresh
+  }
+
+  async set(key: string, data: unknown, dataType: string): Promise<void> {
+    const config = CACHE_STRATEGY[dataType];
+    const totalTTL = config.ttl + config.staleWhileRevalidate;
+
+    await this.redis.setex(key, totalTTL, JSON.stringify({
+      data,
+      timestamp: Date.now(),
+    }));
+  }
+}
+```
+
+---
+
+### Smart Data Aggregator
+
+```typescript
+class FinancialDataAggregator {
+  private rateLimiter: RateLimiter;
+  private cache: DataCache;
+
+  async getCompanyData(ticker: string): Promise<CompanyData> {
+    const cacheKey = `company:${ticker}`;
+
+    // Check cache first
+    const cached = await this.cache.get<CompanyData>(cacheKey, 'profile');
+    if (cached) return cached;
+
+    // Priority order: SEC EDGAR → Finnhub → Yahoo
+    const data = await this.fetchWithFallback(ticker, [
+      { source: 'sec-edgar', fetch: () => this.fetchSEC(ticker) },
+      { source: 'finnhub', fetch: () => this.fetchFinnhub(ticker) },
+      { source: 'yfinance', fetch: () => this.fetchYahoo(ticker) },
+    ]);
+
+    await this.cache.set(cacheKey, data, 'profile');
+    return data;
+  }
+
+  async getQuote(ticker: string): Promise<Quote> {
+    const cacheKey = `quote:${ticker}`;
+
+    const cached = await this.cache.get<Quote>(cacheKey, 'quote');
+    if (cached) return cached;
+
+    // Real-time: Finnhub first (60/min), Yahoo as backup
+    const quote = await this.fetchWithFallback(ticker, [
+      { source: 'finnhub', fetch: () => this.fetchFinnhubQuote(ticker) },
+      { source: 'yfinance', fetch: () => this.fetchYahooQuote(ticker) },
+    ]);
+
+    await this.cache.set(cacheKey, quote, 'quote');
+    return quote;
+  }
+
+  async getTechnicals(ticker: string, indicator: string): Promise<TechnicalData> {
+    const cacheKey = `tech:${ticker}:${indicator}`;
+
+    // ALWAYS check cache for Alpha Vantage (only 25/day!)
+    const cached = await this.cache.get<TechnicalData>(cacheKey, 'technicals');
+    if (cached) return cached;
+
+    // Check if we have remaining Alpha Vantage calls
+    const remaining = await this.rateLimiter.getRemainingCalls('alpha-vantage');
+
+    if (remaining > 0) {
+      const data = await this.fetchAlphaVantage(ticker, indicator);
+      await this.cache.set(cacheKey, data, 'technicals');
+      return data;
+    }
+
+    // Fallback: Calculate locally from Yahoo historical data
+    const history = await this.getHistory(ticker, '1y');
+    return this.calculateTechnicalLocally(history, indicator);
+  }
+
+  private async fetchWithFallback<T>(
+    ticker: string,
+    sources: Array<{ source: string; fetch: () => Promise<T> }>
+  ): Promise<T> {
+    for (const { source, fetch } of sources) {
+      if (await this.rateLimiter.canMakeRequest(source)) {
+        try {
+          return await fetch();
+        } catch (error) {
+          console.warn(`${source} failed for ${ticker}, trying next...`);
+          continue;
+        }
+      }
+    }
+    throw new Error(`All sources exhausted for ${ticker}`);
+  }
+}
+```
+
+---
+
+### Local Technical Indicator Calculation
+
+When Alpha Vantage rate limit is exhausted, calculate indicators locally:
+
+```typescript
+// Calculate RSI locally to save API calls
+function calculateRSI(prices: number[], period = 14): number[] {
+  const rsi: number[] = [];
+  let avgGain = 0;
+  let avgLoss = 0;
+
+  for (let i = 1; i < prices.length; i++) {
+    const change = prices[i] - prices[i - 1];
+    const gain = change > 0 ? change : 0;
+    const loss = change < 0 ? -change : 0;
+
+    if (i <= period) {
+      avgGain += gain / period;
+      avgLoss += loss / period;
+    } else {
+      avgGain = (avgGain * (period - 1) + gain) / period;
+      avgLoss = (avgLoss * (period - 1) + loss) / period;
+    }
+
+    if (i >= period) {
+      const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+      rsi.push(100 - (100 / (1 + rs)));
+    }
+  }
+  return rsi;
+}
+
+// Calculate MACD locally
+function calculateMACD(
+  prices: number[],
+  fastPeriod = 12,
+  slowPeriod = 26,
+  signalPeriod = 9
+): { macd: number[]; signal: number[]; histogram: number[] } {
+  const emaFast = calculateEMA(prices, fastPeriod);
+  const emaSlow = calculateEMA(prices, slowPeriod);
+
+  const macd = emaFast.map((fast, i) => fast - emaSlow[i]);
+  const signal = calculateEMA(macd, signalPeriod);
+  const histogram = macd.map((m, i) => m - signal[i]);
+
+  return { macd, signal, histogram };
+}
+
+function calculateEMA(prices: number[], period: number): number[] {
+  const multiplier = 2 / (period + 1);
+  const ema: number[] = [prices[0]];
+
+  for (let i = 1; i < prices.length; i++) {
+    ema.push((prices[i] - ema[i - 1]) * multiplier + ema[i - 1]);
+  }
+  return ema;
+}
+```
+
+---
+
+### Daily API Budget Allocation
+
+```typescript
+// Optimize 25 Alpha Vantage calls/day
+const DAILY_BUDGET = {
+  'alpha-vantage': {
+    total: 25,
+    allocation: {
+      technicals: 20,      // Primary use
+      intraday: 3,         // Limited intraday
+      reserved: 2,         // Emergency buffer
+    }
+  },
+  'finnhub': {
+    total: 3600,           // 60/min * 60 = 3600/hour
+    allocation: {
+      quotes: 2000,        // Real-time prices
+      news: 1000,          // Company news
+      fundamentals: 500,   // Basic metrics
+      reserved: 100,       // Buffer
+    }
+  }
+};
+
+// Track usage across the day
+class BudgetTracker {
+  async trackUsage(source: string, category: string): Promise<void> {
+    const key = `budget:${source}:${category}:${this.getDateKey()}`;
+    await this.redis.incr(key);
+    await this.redis.expire(key, 86400);
+  }
+
+  async getRemainingBudget(source: string, category: string): Promise<number> {
+    const key = `budget:${source}:${category}:${this.getDateKey()}`;
+    const used = parseInt(await this.redis.get(key) || '0');
+    return DAILY_BUDGET[source].allocation[category] - used;
+  }
+
+  private getDateKey(): string {
+    return new Date().toISOString().split('T')[0];
+  }
+}
+```
+
+---
+
+### API Comparison - Final Selection
+
+| Feature | SEC EDGAR | Finnhub | Yahoo | Alpha Vantage |
+|---------|-----------|---------|-------|---------------|
+| **Cost** | FREE | FREE | FREE | FREE |
+| **Rate** | 10/sec | 60/min | Unlimited | 25/day |
+| **API Key** | NO | Yes | NO | Yes |
+| **Best For** | Fundamentals | Real-time | Backup | Technicals |
+| **Use When** | Always | Primary | Fallback | Cached only |
 
 ---
 
